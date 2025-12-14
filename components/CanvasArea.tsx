@@ -48,12 +48,14 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
   const [bgDragStart, setBgDragStart] = useState({ x: 0, y: 0 });
 
   // Mask Dragging/Resizing
-  const [isDraggingMask, setIsDraggingMask] = useState(false);
-  const [isResizingMask, setIsResizingMask] = useState(false);
-  const [maskDragStart, setMaskDragStart] = useState({ x: 0, y: 0 });
-  const [maskResizeHandle, setMaskResizeHandle] = useState<'br' | null>(null);
+  const [maskInteraction, setMaskInteraction] = useState<{
+    type: 'drag' | 'resize' | null;
+    startX: number;
+    startY: number;
+    initialRect: MaskRect | null;
+  }>({ type: null, startX: 0, startY: 0, initialRect: null });
 
-  // Workspace Panning (Outer View)
+  // Workspace Panning
   const [isPanningView, setIsPanningView] = useState(false);
   const [viewPanStart, setViewPanStart] = useState({ x: 0, y: 0 });
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: 0.9 }); 
@@ -69,7 +71,7 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
   // --- Handlers ---
 
   const handleLayerMouseDown = (e: React.MouseEvent, layer: TextLayer) => {
-    if (isMaskMode) return; // Disable text interaction in mask mode
+    if (isMaskMode) return; 
     e.stopPropagation();
     onSelectLayer(layer.id);
     setIsDraggingLayer(true);
@@ -91,19 +93,27 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
   const handleMaskMouseDown = (e: React.MouseEvent) => {
     if (!isMaskMode || !maskRect) return;
     e.stopPropagation();
-    setIsDraggingMask(true);
+    setMaskInteraction({
+        type: 'drag',
+        startX: e.clientX,
+        startY: e.clientY,
+        initialRect: { ...maskRect }
+    });
   };
 
   const handleMaskResizeMouseDown = (e: React.MouseEvent) => {
     if (!isMaskMode || !maskRect) return;
     e.stopPropagation();
-    setIsResizingMask(true);
-    setMaskResizeHandle('br');
+    setMaskInteraction({
+        type: 'resize',
+        startX: e.clientX,
+        startY: e.clientY,
+        initialRect: { ...maskRect }
+    });
   };
 
   const handleCanvasMouseDown = (e: React.MouseEvent) => {
     if (isMaskMode) {
-      // In mask mode, clicking the image moves the mask box to that location
       const target = e.target as HTMLElement;
       if (target.tagName === 'IMG' && maskRect) {
         e.stopPropagation();
@@ -114,16 +124,8 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
         const clickVisualX = e.clientX - rect.left - (rect.width / 2);
         const clickVisualY = e.clientY - rect.top - (rect.height / 2);
         
-        // Calculate the scale factor (Visual / Intrinsic)
-        // Since the image is rendered inside a scaled container, the visual size matches intrinsic * scale
-        // But simply: We need the coordinate in "Image Intrinsic Space" because maskRect is rendered inside the scale transform.
-        // The click coordinates (clientX) are screen pixels. 
-        // The element we clicked is Scaled.
-        // rect.width = intrinsicWidth * totalScale (where totalScale = backgroundTransform.scale * viewTransform.scale roughly)
-        // We can just use the ratio of rect.width / naturalWidth to convert visual delta to intrinsic delta.
-        
+        // Convert to intrinsic image coordinates
         const scaleFactor = rect.width / img.naturalWidth;
-        
         const newX = clickVisualX / scaleFactor;
         const newY = clickVisualY / scaleFactor;
 
@@ -157,30 +159,43 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
   // --- Global Mouse Move/Up ---
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      // 0. Mask Interaction (Inside scaled context)
-      if (isMaskMode && maskRect) {
-         if (isDraggingMask) {
-             const totalScale = viewTransform.scale * backgroundTransform.scale;
-             const deltaX = e.movementX / totalScale;
-             const deltaY = e.movementY / totalScale;
-             
+      // 0. Mask Interaction
+      if (isMaskMode && maskInteraction.type && maskInteraction.initialRect) {
+         // Calculate the total scale applied to the mask (Workspace Zoom * Image Transform Scale)
+         const totalScale = viewTransform.scale * backgroundTransform.scale;
+         
+         const deltaScreenX = e.clientX - maskInteraction.startX;
+         const deltaScreenY = e.clientY - maskInteraction.startY;
+
+         // Convert screen pixel delta to intrinsic image pixel delta
+         const deltaImageX = deltaScreenX / totalScale;
+         const deltaImageY = deltaScreenY / totalScale;
+
+         if (maskInteraction.type === 'drag') {
              onUpdateMaskRect({
-                 x: maskRect.x + deltaX,
-                 y: maskRect.y + deltaY
+                 x: maskInteraction.initialRect.x + deltaImageX,
+                 y: maskInteraction.initialRect.y + deltaImageY
              });
-             return;
-         }
-         if (isResizingMask) {
-             const totalScale = viewTransform.scale * backgroundTransform.scale;
-             const deltaX = e.movementX / totalScale;
-             const deltaY = e.movementY / totalScale;
+         } else if (maskInteraction.type === 'resize') {
+             // 1. Calculate new width/height
+             const newWidth = Math.max(20, maskInteraction.initialRect.width + deltaImageX);
+             const newHeight = Math.max(20, maskInteraction.initialRect.height + deltaImageY);
              
+             // 2. IMPORTANT: Adjust center (x,y) to compensate for width/height change.
+             // Since x,y is the center point, if we just increase width, the box grows from center.
+             // To Anchor Top-Left: Center must move by half the delta.
+             // shift = (NewSize - OldSize) / 2
+             const shiftX = (newWidth - maskInteraction.initialRect.width) / 2;
+             const shiftY = (newHeight - maskInteraction.initialRect.height) / 2;
+
              onUpdateMaskRect({
-                 width: Math.max(20, maskRect.width + deltaX),
-                 height: Math.max(20, maskRect.height + deltaY)
+                 width: newWidth,
+                 height: newHeight,
+                 x: maskInteraction.initialRect.x + shiftX,
+                 y: maskInteraction.initialRect.y + shiftY
              });
-             return;
          }
+         return;
       }
 
       // 1. Resizing Text Layer
@@ -225,8 +240,7 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
       setIsDraggingBg(false);
       setIsPanningView(false);
       setResizeState(prev => ({ ...prev, isResizing: false }));
-      setIsDraggingMask(false);
-      setIsResizingMask(false);
+      setMaskInteraction({ type: null, startX: 0, startY: 0, initialRect: null });
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -241,7 +255,7 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
     selectedLayerId, viewPanStart, bgDragStart, 
     layers, onUpdateLayer, onUpdateBackgroundTransform, 
     viewTransform.scale, backgroundImage,
-    isMaskMode, isDraggingMask, isResizingMask, maskRect, backgroundTransform.scale, onUpdateMaskRect
+    isMaskMode, maskInteraction, backgroundTransform.scale, onUpdateMaskRect
   ]);
 
   const handleWheel = (e: React.WheelEvent) => {
@@ -289,7 +303,7 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
         <div 
             style={{ 
                 transform: `translate(${viewTransform.x}px, ${viewTransform.y}px) scale(${viewTransform.scale})`,
-                transition: (isPanningView || resizeState.isResizing || isDraggingMask || isResizingMask) ? 'none' : 'transform 0.1s ease-out'
+                transition: (isPanningView || resizeState.isResizing || maskInteraction.type) ? 'none' : 'transform 0.1s ease-out'
             }}
             className="origin-center"
         >
@@ -323,26 +337,32 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
                             draggable={false}
                         />
                         
-                        {/* MASK OVERLAY */}
+                        {/* MASK OVERLAY - Adjusted for visibility and usability */}
                         {isMaskMode && maskRect && (
                             <>
                                 <div 
-                                    className="absolute bg-red-500/40 border-2 border-red-500 cursor-move z-50 flex items-end justify-end"
+                                    className="absolute cursor-move z-50 flex items-end justify-end"
                                     style={{
                                         width: `${maskRect.width}px`,
                                         height: `${maskRect.height}px`,
                                         left: `calc(50% + ${maskRect.x}px - ${maskRect.width / 2}px)`,
                                         top: `calc(50% + ${maskRect.y}px - ${maskRect.height / 2}px)`,
+                                        backgroundColor: 'rgba(255, 0, 0, 0.25)', // More transparent fill
+                                        boxShadow: '0 0 0 2px rgba(255, 0, 0, 1), 0 0 0 4px rgba(255, 255, 255, 0.5)' // Double border (Red inner, White outer)
                                     }}
                                     onMouseDown={handleMaskMouseDown}
                                 >
-                                    {/* Resize Handle */}
+                                    {/* Big Resize Handle */}
                                     <div 
-                                        className="w-4 h-4 bg-white border border-red-500 cursor-nwse-resize -mr-2 -mb-2"
+                                        className="w-8 h-8 bg-white border-2 border-red-500 cursor-nwse-resize -mr-4 -mb-4 rounded-full shadow-lg hover:scale-110 transition-transform flex items-center justify-center"
                                         onMouseDown={handleMaskResizeMouseDown}
-                                    />
+                                    >
+                                        {/* Little Icon inside handle */}
+                                        <div className="w-2 h-2 border-r-2 border-b-2 border-red-400 rotate-45 -mt-0.5 -ml-0.5"></div>
+                                    </div>
                                     
-                                    <div className="absolute -top-6 left-0 bg-red-600 text-white text-[10px] px-1 rounded whitespace-nowrap pointer-events-none">
+                                    {/* Bigger, clearer Label */}
+                                    <div className="absolute -top-12 left-0 bg-red-600 text-white text-xl font-bold px-4 py-2 rounded shadow-lg whitespace-nowrap pointer-events-none tracking-wide border border-white/20">
                                         去水印区域
                                     </div>
                                 </div>
@@ -393,17 +413,18 @@ export const CanvasArea: React.FC<CanvasAreaProps> = ({
                 )}
               </div>
             ))}
-            
-            {/* Mask Mode Overlay hint */}
-            {isMaskMode && (
-                <div className="absolute inset-0 bg-black/50 pointer-events-none z-40 flex items-center justify-center">
-                    <div className="bg-black/70 text-white px-4 py-2 rounded-full text-sm pointer-events-none">
-                        拖拽红色方框，或点击图片移动选区
-                    </div>
-                </div>
-            )}
           </div>
         </div>
+        
+        {/* Mask Mode Instruction Toast (Non-blocking) */}
+        {isMaskMode && (
+             <div className="absolute top-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+                 <div className="bg-gray-900/90 text-white px-6 py-3 rounded-xl shadow-2xl border border-gray-700 flex items-center gap-3 backdrop-blur-md">
+                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+                    <span className="font-medium text-sm">拖拽红框或点击图片选择要消除的区域</span>
+                 </div>
+             </div>
+        )}
         
         {/* Workspace Zoom Controls */}
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-gray-800 rounded-full px-4 py-2 flex items-center gap-4 shadow-xl border border-gray-700 z-50">

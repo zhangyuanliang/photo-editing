@@ -299,7 +299,7 @@ export const Controls: React.FC<ControlsProps> = ({
 
                    <div>
                         <label className="block text-xs font-medium text-gray-400 uppercase mb-2">
-                        缩放比例 ({Math.round(backgroundTransform.scale * 100)}%)
+                        图片缩放比例 ({Math.round(backgroundTransform.scale * 100)}%)
                         </label>
                         <input
                         type="range"
