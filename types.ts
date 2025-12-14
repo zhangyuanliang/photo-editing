@@ -18,6 +18,13 @@ export interface TextLayer {
   orientation: 'horizontal' | 'vertical';
 }
 
+export interface MaskRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface CanvasState {
   backgroundImage: string | null;
   backgroundTransform: {
@@ -28,6 +35,8 @@ export interface CanvasState {
   aspectRatio: AspectRatio;
   layers: TextLayer[];
   selectedLayerId: string | null;
+  isMaskMode: boolean;
+  maskRect: MaskRect | null;
 }
 
 export const FONTS = [

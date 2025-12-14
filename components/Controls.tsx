@@ -7,9 +7,15 @@ interface ControlsProps {
   backgroundTransform: { x: number; y: number; scale: number };
   onUpdateBackgroundTransform: (updates: Partial<{ x: number; y: number; scale: number }>) => void;
   onUpdateLayer: (id: string, updates: Partial<TextLayer>) => void;
+  onUpdateBackgroundImage: (newImage: string) => void;
   onDeleteLayer: (id: string) => void;
   onAddLayer: () => void;
   hasBackground: boolean;
+  backgroundImage: string | null;
+  // Mask Props
+  isMaskMode: boolean;
+  onToggleMaskMode: (active: boolean) => void;
+  onExecuteMaskedRemoval: () => Promise<string | null>;
 }
 
 export const Controls: React.FC<ControlsProps> = ({
@@ -17,20 +23,80 @@ export const Controls: React.FC<ControlsProps> = ({
   backgroundTransform,
   onUpdateBackgroundTransform,
   onUpdateLayer,
+  onUpdateBackgroundImage,
   onDeleteLayer,
   onAddLayer,
-  hasBackground
+  hasBackground,
+  backgroundImage,
+  isMaskMode,
+  onToggleMaskMode,
+  onExecuteMaskedRemoval
 }) => {
   const [aiPrompt, setAiPrompt] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingCopy, setIsGeneratingCopy] = useState(false);
+  const [isRemovingWatermark, setIsRemovingWatermark] = useState(false);
 
   const handleAiGenerate = async () => {
     if (!aiPrompt || !selectedLayer) return;
-    setIsGenerating(true);
+    setIsGeneratingCopy(true);
     const result = await generateMarketingCopy(aiPrompt);
     onUpdateLayer(selectedLayer.id, { text: result });
-    setIsGenerating(false);
+    setIsGeneratingCopy(false);
   };
+
+  const handleConfirmRemoval = async () => {
+    setIsRemovingWatermark(true);
+    const newImage = await onExecuteMaskedRemoval();
+    if (newImage) {
+        onUpdateBackgroundImage(newImage);
+        onToggleMaskMode(false); // Exit mode on success
+    } else {
+        alert("去除水印失败，请稍后重试。");
+    }
+    setIsRemovingWatermark(false);
+  };
+
+  if (isMaskMode) {
+      return (
+        <div className="w-80 bg-gray-800 border-l border-gray-700 flex flex-col h-full overflow-y-auto">
+            <div className="p-4 border-b border-gray-700 bg-gray-900">
+                <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                    <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                    区域去水印模式
+                </h2>
+                <p className="text-xs text-gray-400 mt-1">请调整红色框覆盖需要去除的内容</p>
+            </div>
+            
+            <div className="p-6 space-y-4">
+                <button
+                    onClick={handleConfirmRemoval}
+                    disabled={isRemovingWatermark}
+                    className={`w-full py-3 px-4 rounded-lg text-sm font-bold transition-all shadow-lg flex items-center justify-center gap-2 ${
+                        isRemovingWatermark 
+                        ? 'bg-purple-800 text-purple-300 cursor-wait' 
+                        : 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-500/20'
+                    }`}
+                >
+                    {isRemovingWatermark ? 'AI 处理中...' : '✨ 确认消除'}
+                </button>
+
+                <button
+                    onClick={() => onToggleMaskMode(false)}
+                    disabled={isRemovingWatermark}
+                    className="w-full py-3 px-4 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+                >
+                    取消
+                </button>
+            </div>
+
+            <div className="mt-auto p-4 bg-gray-700/30">
+                 <p className="text-xs text-gray-500 text-center">
+                     AI 将移除红框内的内容并自动填充背景。
+                 </p>
+            </div>
+        </div>
+      );
+  }
 
   return (
     <div className="w-80 bg-gray-800 border-l border-gray-700 flex flex-col h-full overflow-y-auto">
@@ -83,10 +149,10 @@ export const Controls: React.FC<ControlsProps> = ({
               />
               <button 
                 onClick={handleAiGenerate}
-                disabled={isGenerating || !aiPrompt}
+                disabled={isGeneratingCopy || !aiPrompt}
                 className="bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs disabled:opacity-50"
               >
-                生成
+                {isGeneratingCopy ? '...' : '生成'}
               </button>
             </div>
           </div>
@@ -205,12 +271,29 @@ export const Controls: React.FC<ControlsProps> = ({
            
            {hasBackground ? (
                <div className="space-y-4">
-                   <div className="bg-blue-900/20 p-3 rounded text-sm text-blue-200 border border-blue-900/50">
-                       <p className="mb-1"><strong>操作提示:</strong></p>
-                       <ul className="list-disc pl-4 space-y-1 text-xs opacity-80">
-                           <li>在画布上拖动图片可移动位置</li>
-                           <li>拖动下方滑块调整图片大小</li>
-                           <li>选中文字可拖动四个角缩放</li>
+                   {/* Magic Remove */}
+                   <div className="bg-gradient-to-br from-purple-900/30 to-blue-900/30 p-3 rounded-lg border border-purple-500/30">
+                        <label className="block text-xs font-medium text-purple-300 uppercase mb-2 flex items-center gap-1">
+                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                             AI 区域去水印
+                        </label>
+                        <button
+                            onClick={() => onToggleMaskMode(true)}
+                            className="w-full py-2 px-4 rounded-md text-sm font-medium bg-purple-600 hover:bg-purple-500 text-white shadow-purple-500/20 transition-all shadow-lg flex items-center justify-center gap-2"
+                        >
+                             ✨ 选择区域并消除
+                        </button>
+                        <p className="text-[10px] text-gray-400 mt-2 leading-tight">
+                            提示: 点击按钮进入选择模式，框选水印后让 AI 精准消除。
+                        </p>
+                   </div>
+
+                   <div className="bg-gray-700/30 p-3 rounded border border-gray-700">
+                       <p className="mb-2 text-xs font-medium text-gray-400 uppercase">操作提示</p>
+                       <ul className="list-disc pl-4 space-y-1 text-xs text-gray-300 opacity-80">
+                           <li>拖动图片可移动位置</li>
+                           <li>拖动下方滑块调整大小</li>
+                           <li>选中文字拖动四角可缩放</li>
                        </ul>
                    </div>
 

@@ -1,8 +1,9 @@
 import React, { useState, useRef } from 'react';
-import { AspectRatio, CanvasState, TextLayer } from './types';
+import { AspectRatio, CanvasState, TextLayer, MaskRect } from './types';
 import { CanvasArea } from './components/CanvasArea';
 import { Controls } from './components/Controls';
 import { nanoid } from 'nanoid';
+import { removeImageWatermark } from './services/geminiService';
 
 const App: React.FC = () => {
   const [state, setState] = useState<CanvasState>({
@@ -10,7 +11,9 @@ const App: React.FC = () => {
     backgroundTransform: { x: 0, y: 0, scale: 1 },
     aspectRatio: AspectRatio.SQUARE,
     layers: [],
-    selectedLayerId: null
+    selectedLayerId: null,
+    isMaskMode: false,
+    maskRect: null
   });
 
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -29,7 +32,6 @@ const App: React.FC = () => {
           const imgSrc = event.target.result as string;
           const img = new Image();
           img.onload = () => {
-            // Calculate initial "cover" scale relative to our UI canvas size (base height 600px)
             const uiHeight = 600;
             const uiWidth = state.aspectRatio === AspectRatio.SQUARE ? 600 : (600 * 9) / 16;
             
@@ -40,7 +42,9 @@ const App: React.FC = () => {
             setState(prev => ({ 
               ...prev, 
               backgroundImage: imgSrc,
-              backgroundTransform: { x: 0, y: 0, scale: scale }
+              backgroundTransform: { x: 0, y: 0, scale: scale },
+              isMaskMode: false,
+              maskRect: null
             }));
           };
           img.src = imgSrc;
@@ -54,6 +58,13 @@ const App: React.FC = () => {
     setState(prev => ({
       ...prev,
       backgroundTransform: { ...prev.backgroundTransform, ...updates }
+    }));
+  };
+
+  const updateBackgroundImage = (newImage: string) => {
+    setState(prev => ({
+      ...prev,
+      backgroundImage: newImage
     }));
   };
 
@@ -73,7 +84,8 @@ const App: React.FC = () => {
     setState(prev => ({
       ...prev,
       layers: [...prev.layers, newLayer],
-      selectedLayerId: newLayer.id
+      selectedLayerId: newLayer.id,
+      isMaskMode: false // Exit mask mode if adding text
     }));
   };
 
@@ -96,20 +108,93 @@ const App: React.FC = () => {
     setState(prev => ({ ...prev, selectedLayerId: id }));
   };
 
+  // --- Masking Logic ---
+
+  const toggleMaskMode = (active: boolean) => {
+    setState(prev => {
+        // If activating, and no mask exists, center one roughly on the image
+        let initialMask = prev.maskRect;
+        if (active && !initialMask) {
+             // Default 150x150 mask centered relative to "visual" view, but mapped to image coords?
+             // To keep it simple, we initialize it at a safe spot in Image Coordinates.
+             // Since we don't know image natural size here easily without refs, we'll let CanvasArea handle default placement
+             // OR we define it here if we assume standard size.
+             // Let's rely on CanvasArea to render a default if null, or set a generic one.
+             // Actually, let's set a default 100x100 at 0,0 relative to image center
+             initialMask = { x: 0, y: 0, width: 200, height: 100 };
+        }
+
+        return {
+            ...prev,
+            isMaskMode: active,
+            maskRect: active ? initialMask : null,
+            selectedLayerId: null // Deselect text when masking
+        };
+    });
+  };
+
+  const updateMaskRect = (updates: Partial<MaskRect>) => {
+      setState(prev => ({
+          ...prev,
+          maskRect: prev.maskRect ? { ...prev.maskRect, ...updates } : null
+      }));
+  };
+
+  const executeMaskedRemoval = async () => {
+      const { backgroundImage, maskRect } = state;
+      if (!backgroundImage || !maskRect) return null;
+
+      // 1. Create a temporary canvas to burn the mask onto the image
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      const img = new Image();
+      img.src = backgroundImage;
+      
+      await new Promise((resolve) => { img.onload = resolve; });
+
+      canvas.width = img.width;
+      canvas.height = img.height;
+
+      if (!ctx) return null;
+
+      // 2. Draw original image
+      ctx.drawImage(img, 0, 0);
+
+      // 3. Draw the Mask (Red Rectangle) onto the image data
+      // Note: maskRect is stored relative to the image's center in our state logic (handled in CanvasArea),
+      // We need to convert that to canvas coordinates.
+      // In CanvasArea, the mask is inside the image container. 
+      // If maskRect.x = 0, it's at the center of the image.
+      // If maskRect.x = -img.width/2, it's at the left edge.
+      
+      ctx.fillStyle = "rgba(255, 0, 0, 0.5)"; // Semi-transparent red
+      
+      // Calculate top-left based on center-origin coordinates
+      const drawX = (img.width / 2) + maskRect.x - (maskRect.width / 2);
+      const drawY = (img.height / 2) + maskRect.y - (maskRect.height / 2);
+      
+      ctx.fillRect(drawX, drawY, maskRect.width, maskRect.height);
+
+      // 4. Get Base64
+      const burnedImage = canvas.toDataURL('image/png');
+
+      // 5. Send to Gemini
+      return await removeImageWatermark(burnedImage, true);
+  };
+
+  // --- Export ---
+
   const exportImage = async () => {
-    // 1. Setup Canvas
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     if (!ctx || !state.backgroundImage) return;
 
-    // Define high-res export size
     const exportHeight = 1920; 
     const exportWidth = state.aspectRatio === AspectRatio.SQUARE ? 1920 : 1080;
     
     canvas.width = exportWidth;
     canvas.height = exportHeight;
 
-    // 2. Draw Background with Transforms
     const img = new Image();
     img.src = state.backgroundImage;
     await new Promise((resolve) => {
@@ -127,7 +212,6 @@ const App: React.FC = () => {
     ctx.drawImage(img, -img.width / 2, -img.height / 2);
     ctx.restore();
 
-    // 3. Draw Layers
     const domWidth = canvasRef.current?.offsetWidth || (state.aspectRatio === AspectRatio.SQUARE ? 600 : 337.5);
     const scaleFactor = exportWidth / domWidth;
 
@@ -135,60 +219,20 @@ const App: React.FC = () => {
       ctx.font = `${layer.fontWeight} ${layer.fontSize * scaleFactor}px ${layer.fontFamily}`;
       ctx.fillStyle = layer.color;
       ctx.textBaseline = 'top';
-      
       const lineHeight = layer.fontSize * scaleFactor * 1.2;
       
       if (layer.orientation === 'vertical') {
-        // Handle Vertical Text Export (Simulating vertical-rl)
         const lines = layer.text.split('\n');
-        // In vertical-rl, lines stack from right to left
-        // We start drawing the first line at the rightmost position
-        // However, the (x, y) coordinate is the top-left of the bounding box usually.
-        // For simplicity in this approximation: we start at layer.x, but we move LEFT for subsequent lines.
-        
         lines.forEach((line, lineIndex) => {
-            // Calculate X for this column (line). 
-            // Since it's vertical-rl, the first line is at layer.x (or rightmost? standard CSS vertical-rl places line 1 at right).
-            // But our DOM (x,y) is top-left of the flow.
-            // Let's assume layer.x is the left edge of the block for now, but vertical-rl fills from right.
-            // A simple approximation: line 0 is at X, line 1 is at X - lineHeight. 
-            // Wait, usually vertical text flows Right to Left.
-            // Let's assume layer.x is the Rightmost edge? No, web standard is top-left position is the anchor.
-            // If css is writing-mode: vertical-rl; text-orientation: upright;
-            // The element's Top-Left corner is at (layer.x, layer.y).
-            // The first column is stuck to the Right edge of the content box, or Left?
-            // Standard vertical-rl: Lines flow Right to Left. 
-            // So Line 0 is Rightmost. Line 1 is left of Line 0.
-            
-            // For simple export:
-            // We need to measure the text block width to know where "Right" is? 
-            // Let's simplify: Draw column 0 at X, column 1 at X - fontSize?
-            // Actually, let's just stack them Left to Right for simplicity if that's easier, but Chinese vertical is R-to-L.
-            // Let's implement R-to-L stacking.
-            // We offset X by (lines.length - 1 - lineIndex) * lineHeight to make the first line appear on the right?
-            // No, let's keep it simple. Draw line 0 at X. Draw line 1 at X - lineHeight.
-            // But CSS vertical-rl starts at the "logical top" which is physically Right.
-            // Let's try drawing Line 0 at X, Line 1 at X - lineHeight.
-            
             const lineX = (layer.x * scaleFactor) - (lineIndex * lineHeight); 
-            // NOTE: This assumes the user positioned the "Right" side of the text at layer.x. 
-            // Realistically, DOM positioning for vertical text is tricky. 
-            // Let's stick to a simpler approach: Draw characters downwards.
-            // We will just draw lines shift LEFT.
-            
             const chars = line.split('');
             chars.forEach((char, charIndex) => {
-                const charX = lineX + (lineHeight - (layer.fontSize * scaleFactor)) / 2; // Center char in column
-                const charY = (layer.y * scaleFactor) + (charIndex * lineHeight); // Use lineHeight as char height spacing roughly
-                
-                // Check if it's a non-CJK character that needs rotation? 
-                // For 'upright' orientation, all chars are upright.
+                const charX = lineX + (lineHeight - (layer.fontSize * scaleFactor)) / 2; 
+                const charY = (layer.y * scaleFactor) + (charIndex * lineHeight); 
                 ctx.fillText(char, charX, charY);
             });
         });
-
       } else {
-        // Handle Horizontal Text Export
         const lines = layer.text.split('\n');
         lines.forEach((line, index) => {
           const textX = layer.x * scaleFactor;
@@ -198,7 +242,6 @@ const App: React.FC = () => {
       }
     });
 
-    // 4. Download
     const link = document.createElement('a');
     link.download = `poster-${Date.now()}.png`;
     link.href = canvas.toDataURL('image/png');
@@ -283,15 +326,25 @@ const App: React.FC = () => {
           selectedLayerId={state.selectedLayerId}
           onSelectLayer={selectLayer}
           onUpdateLayer={updateLayer}
+          // Mask Props
+          isMaskMode={state.isMaskMode}
+          maskRect={state.maskRect}
+          onUpdateMaskRect={updateMaskRect}
         />
         <Controls
           selectedLayer={selectedLayer}
           backgroundTransform={state.backgroundTransform}
           onUpdateBackgroundTransform={updateBackgroundTransform}
+          onUpdateBackgroundImage={updateBackgroundImage}
           onUpdateLayer={updateLayer}
           onDeleteLayer={deleteLayer}
           onAddLayer={addLayer}
           hasBackground={!!state.backgroundImage}
+          backgroundImage={state.backgroundImage}
+          // Mask Props
+          isMaskMode={state.isMaskMode}
+          onToggleMaskMode={toggleMaskMode}
+          onExecuteMaskedRemoval={executeMaskedRemoval}
         />
       </div>
     </div>
